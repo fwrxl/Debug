@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "dogfood": {
+      "source": "NousResearch/hermes-agent",
+      "sourceType": "github",
+      "skillPath": "skills/dogfood/SKILL.md",
+      "computedHash": "7e102bfc074eec099b9e9b1b5db2c3695ef784463d0d4bee9f7b1ad9bd42b835"
+    },
+    "yuanbao": {
+      "source": "NousResearch/hermes-agent",
+      "sourceType": "github",
+      "skillPath": "skills/yuanbao/SKILL.md",
+      "computedHash": "ee5aece1bb872c048b7ecf1d74c83a6683cae82ef152cc58b5b279189206315a"
+    }
+  }
+}
