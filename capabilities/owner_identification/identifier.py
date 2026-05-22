@@ -42,8 +42,8 @@ class OwnerIdentifier:
             log_attempts = memory.iteration.get_attempts_by_step("log_localization") if hasattr(memory, 'iteration') else []
 
             # 获取 situation_analysis 和 log_localization 的结果
-            situation_result = sit_attempts[-1]["evidence"] if sit_attempts else {}
-            log_result = log_attempts[-1]["evidence"] if log_attempts else {}
+            situation_result = sit_attempts[-1].get("evidence", {}) if sit_attempts else {}
+            log_result = log_attempts[-1].get("evidence", {}) if log_attempts else {}
 
             # 从结果中提取可能的模块
             possible_modules = situation_result.get("possible_modules", [])
@@ -134,7 +134,7 @@ class OwnerIdentifier:
                 {"role": "system", "content": "你是模块识别专家，只返回有效模块列表中的模块。"},
                 {"role": "user", "content": prompt}
             ]
-            response = self.llm_client.chat(messages, max_tokens=50)
+            response = self.llm_client.chat(messages)
             module_name = response.strip().lower()
 
             # 验证模块名称是否在有效列表中
@@ -169,6 +169,3 @@ class OwnerIdentifier:
             return None
         return self._table.get_owner(module_name)
 
-    def reload_table(self):
-        """重新加载表格数据"""
-        self._table.reload()

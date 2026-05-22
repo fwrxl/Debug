@@ -32,17 +32,17 @@ class CandidateModule:
     def __init__(
         self,
         module: str,
-        reason: str,
+        explanation: str,
         confidence: float,
     ):
         self.module = module
-        self.reason = reason
+        self.explanation = explanation
         self.confidence = confidence
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "module": self.module,
-            "reason": self.reason,
+            "explanation": self.explanation,
             "confidence": self.confidence,
         }
 
@@ -139,10 +139,6 @@ class IterationMemory:
         """获取所有失败的尝试"""
         return [a for a in self.attempts if not a.get("success", False)]
 
-    def get_successful_attempts(self) -> List[Dict[str, Any]]:
-        """获取所有成功的尝试"""
-        return [a for a in self.attempts if a.get("success", False)]
-
     def get_attempts_by_step(self, step: str) -> List[Dict[str, Any]]:
         """获取某步骤的所有尝试"""
         return [a for a in self.attempts if a.get("step") == step]
@@ -179,15 +175,6 @@ class MemoryModule:
         # 分支记忆：key 是模块名，value 包含该分支的 context 和 iteration
         self.branch_memories: Dict[str, Dict[str, Any]] = {}
 
-    def reset(self):
-        """重置记忆（新输入开始时调用）"""
-        self.context.clear()
-        self.iteration.clear()
-        self.possible_modules = []
-        self.created_at = datetime.now().isoformat()
-        self._bug_module = None
-        self._owner_open_id = None
-
     # ========== 上下文记忆接口 ==========
 
     def add_conversation(self, step: str, role: str, content: str):
@@ -209,13 +196,13 @@ class MemoryModule:
 
         Args:
             candidates: 情景分析返回的 possible_modules 列表
-            格式: [{"module": "xxx", "reason": "...", "confidence": 0.9}, ...]
+            格式: [{"module": "xxx", "explanation": "...", "confidence": 0.9}, ...]
         """
         for c in candidates:
             module = c.get("module", "")
-            reason = c.get("reason", "")
+            explanation = c.get("explanation", "")
             confidence = c.get("confidence", 0.0)
-            self.possible_modules.append(CandidateModule(module, reason, confidence))
+            self.possible_modules.append(CandidateModule(module, explanation, confidence))
 
     def update_module_confidence(self, target_module: str, delta: float):
         """
@@ -262,23 +249,6 @@ class MemoryModule:
 
     # ========== 查询接口 ==========
 
-    def get_conversation(self) -> List[Dict[str, Any]]:
-        """获取完整对话记录"""
-        return self.context.get_conversation()
-
-    def get_failed_attempts(self) -> List[Dict[str, Any]]:
-        """获取失败的尝试记录"""
-        return self.iteration.get_failed_attempts()
-
-    def get_attempts_by_step(self, step: str) -> List[Dict[str, Any]]:
-        """获取某步骤的尝试记录"""
-        return self.iteration.get_attempts_by_step(step)
-
-    def get_latest_attempt(self, step_name: str) -> Optional[Dict[str, Any]]:
-        """获取某步骤的最新尝试记录"""
-        attempts = self.iteration.get_attempts_by_step(step_name)
-        return attempts[-1] if attempts else None
-
     # ========== Bug Module 接口 ==========
 
     def set_bug_module(self, module_name: str):
@@ -299,11 +269,83 @@ class MemoryModule:
         """获取 owner_open_id"""
         return self._owner_open_id
 
-    def to_dict(self) -> Dict[str, Any]:
-        """导出完整记忆"""
-        return {
-            "created_at": self.created_at,
-            "context": self.context.to_dict(),
-            "iteration": self.iteration.to_dict(),
-            "possible_modules": [c.to_dict() for c in self.possible_modules],
-        }
+    def get_branch_summary(self, module_name: str) -> str:
+        """
+        提取指定分支的完整记忆摘要。
+
+        包含两部分：
+        1. 上下文 — LLM 决策对话历史（为什么选这个能力）
+        2. 能力使用 — 已执行的能力列表及结果摘要
+
+        Args:
+            module_name: 分支对应的模块名
+
+        Returns:
+            带明确标题的格式化字符串，可直接插入 prompt
+        """
+        # 优先从分支记忆读取，否则回退到全局
+        if hasattr(self, 'branch_memories') and module_name in self.branch_memories:
+            branch_mem = self.branch_memories[module_name]
+            context = branch_mem.get("context", self.context)
+            iteration = branch_mem.get("iteration", self.iteration)
+        else:
+            context = self.context
+            iteration = self.iteration
+
+        parts = []
+
+        # ========== 上下文部分 ==========
+        conversations = context.get_conversation() if hasattr(context, 'get_conversation') else []
+        if conversations:
+            parts.append("## 上下文")
+            parts.append("")
+            for entry in conversations:
+                role = entry.get("role", "unknown")
+                if role != "assistant":
+                    continue
+                step = entry.get("step", "unknown")
+                content = entry.get("content", "")
+                parts.append(f"- [{step}] {role}: {content}")
+            parts.append("")
+
+        # ========== 能力使用部分 ==========
+        attempts = iteration.get_attempts_by_step if hasattr(iteration, 'get_attempts_by_step') else lambda s: []
+        # 获取全部 attempts（不区分 step）
+        all_attempts = iteration.attempts if hasattr(iteration, 'attempts') else []
+        if all_attempts:
+            parts.append("## 能力使用")
+            parts.append("")
+            for att in all_attempts:
+                step = att.get("step", "unknown")
+                confidence = att.get("confidence", 0.0)
+                evidence = att.get("evidence", {})
+                success = att.get("success", False)
+                status = "✅" if success else "❌"
+                parts.append(f"- {status} {step} (confidence={confidence:.2f})")
+
+                # 提取关键证据字段
+                if step == "situation_analysis":
+                    possible = evidence.get("possible_modules", [])
+                    if possible:
+                        mod_names = [p.get("module") if isinstance(p, dict) else str(p) for p in possible]
+                        parts.append(f"  候选模块: {', '.join(mod_names)}")
+                elif step == "log_localization":
+                    failed_module = evidence.get("failed_module", "unknown")
+                    explanation = evidence.get("explanation", "unknown")
+                    parts.append(f"  failed_module: {failed_module}")
+                    if explanation and explanation != "unknown":
+                        parts.append(f"  explanation: {explanation}")
+                elif step == "code_localization":
+                    mod = evidence.get("module", "unknown")
+                    explanation = evidence.get("explanation", "")
+                    parts.append(f"  module: {mod}")
+                    if explanation:
+                        parts.append(f"  explanation: {explanation}")
+
+            parts.append("")
+
+        if not parts:
+            return "[暂无记忆]"
+
+        return "\n".join(parts)
+

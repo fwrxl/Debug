@@ -11,7 +11,9 @@
 import os
 import asyncio
 import sys
+import json
 from pathlib import Path
+from datetime import datetime
 
 # 设置环境变量（从 .env 读取，不硬编码）
 project_root = Path(__file__).parent
@@ -35,9 +37,6 @@ from agent.execution.executor import ExecutionModule
 async def run_agent_driven_test(input_data: dict):
     """
     运行多分支诊断流程（直接调用 ExecutionModule）
-
-    Args:
-        input_data: 输入数据
     """
     print("=" * 60)
     print("多分支诊断流程")
@@ -49,55 +48,221 @@ async def run_agent_driven_test(input_data: dict):
     print(f"\n情景: {situation_str}")
     print(f"失败日志长度: {len(failed_log)}")
 
-    # 创建 ExecutionModule
     executor = ExecutionModule()
-
-    # 执行多分支诊断流程
     result = await executor.execute_plan_with_branches(
         situation=situation_str,
         failed_log=failed_log,
     )
- ###你是干什么的？
-    # ========== 输出完整报告 ==========
-    print("\n" + "=" * 60)
-    print("完整执行报告")
-    print("=" * 60)
-
-    print(f"\n【输入】")
-    print(f"情景: {situation_str}")
-    print(f"候选模块: {result.get('candidate_modules', [])}")
-
-    print(f"\n【分支执行】")
-    for br in result.get("branch_results", []):
-        print(f"\nBranch {br['branch_id']} ({br['module']}):")
-        print(f"  reflection_confidence: {br['reflection_confidence']:.2f}")
-        print(f"  reflection_reason: {br['reflection_reason'][:60]}...")
-        print(f"  执行了: {[s['capability'] for s in br['step_results']]}")
-
-    print(f"\n【最终决策】")
-    print(f"best_module: {result.get('best_module')}")
-    print(f"best_confidence: {result.get('best_confidence', 0.0):.2f}")
-    print(f"final_action: {'notify' if result.get('notification_sent') else 'no_notify'}")
-
-    print(f"\n【通知结果】")
-    print(f"notification_sent: {result.get('notification_sent')}")
-    print(f"recipient: {result.get('recipient')}")
 
     return result, executor.memory
 
+
+# ========== 格式化工具函数 ==========
+
+def _indent(text: str, prefix: str = "  ") -> str:
+    """为多行文本添加缩进."""
+    lines = text.splitlines()
+    return "\n".join(prefix + line for line in lines)
+
+
+def _fmt_dict(data: dict, indent: int = 0) -> str:
+    """将字典格式化为易读的多行文本，字符串中的 \\n 会真正换行."""
+    spaces = "  " * indent
+    lines = []
+    for k, v in data.items():
+        if isinstance(v, str) and "\n" in v:
+            lines.append(f"{spaces}{k}:")
+            lines.append(_indent(v, spaces + "  "))
+        elif isinstance(v, dict):
+            lines.append(f"{spaces}{k}:")
+            lines.append(_fmt_dict(v, indent + 1))
+        elif isinstance(v, list):
+            lines.append(f"{spaces}{k}:")
+            for item in v:
+                if isinstance(item, dict):
+                    lines.append(f"{spaces}  -")
+                    lines.append(_fmt_dict(item, indent + 2))
+                else:
+                    lines.append(f"{spaces}  - {item}")
+        else:
+            lines.append(f"{spaces}{k}: {v}")
+    return "\n".join(lines)
+
+
+def _fmt_conversation(entry: dict, indent: int = 0) -> str:
+    """格式化单条 conversation 记录."""
+    spaces = "  " * indent
+    step = entry.get("step", "unknown")
+    role = entry.get("role", "unknown")
+    ts = entry.get("timestamp", "")
+    content = entry.get("content", "")
+    lines = [f"{spaces}[{step}] {role}  {ts}"]
+    if content:
+        lines.append(_indent(content, spaces + "  "))
+    return "\n".join(lines)
+
+
+def _fmt_attempt(att: dict, indent: int = 0) -> str:
+    """格式化单条 attempt 记录."""
+    spaces = "  " * indent
+    step = att.get("step", "unknown")
+    success = att.get("success", False)
+    target = att.get("target_module", "N/A")
+    conf = att.get("confidence", 0.0)
+    ts = att.get("timestamp", "")
+    evidence = att.get("evidence", {})
+    status = "✅" if success else "❌"
+    lines = [
+        f"{spaces}{status} step={step} target={target} confidence={conf}  {ts}",
+    ]
+    if evidence:
+        lines.append(_fmt_dict(evidence, indent + 1))
+    return "\n".join(lines)
+
+
+# ========== 输出核心函数 ==========
+
+def print_memory(memory, result=None):
+    """在终端打印完整的记忆内容."""
+    print("\n" + "=" * 60)
+    print("完整记忆内容")
+    print("=" * 60)
+
+    # --- 全局 iteration ---
+    print("\n## 全局 iteration attempts")
+    for att in memory.iteration.attempts:
+        print(_fmt_attempt(att))
+        print()
+
+    # --- possible_modules ---
+    print("\n## possible_modules")
+    for pm in memory.possible_modules:
+        print(f"  - module: {pm.module}, confidence: {pm.confidence:.2f}, explanation: {pm.explanation}")
+
+    # --- 全局 context ---
+    print("\n## 全局 context conversation")
+    for conv in memory.context.conversation:
+        print(_fmt_conversation(conv))
+        print()
+
+    # --- branch_memories ---
+    print("\n## branch_memories")
+    for module_name, branch_mem in memory.branch_memories.items():
+        print(f"\n### [{module_name}]")
+        print("\n#### context conversation")
+        for conv in branch_mem["context"].conversation:
+            print(_fmt_conversation(conv, indent=1))
+            print()
+        print("\n#### iteration attempts")
+        for att in branch_mem["iteration"].attempts:
+            print(_fmt_attempt(att, indent=1))
+            print()
+
+    # --- 最终结果 ---
+    if result:
+        print("\n" + "=" * 60)
+        print(f"最终结果: success={result.get('success')}")
+        print("=" * 60)
+
+
+def _memory_to_dict(memory, result=None) -> dict:
+    """将 MemoryModule 序列化为完整 JSON 字典."""
+    data = {
+        "meta": {
+            "exported_at": datetime.now().isoformat(),
+            "created_at": getattr(memory, "created_at", ""),
+        },
+        "global_iteration": [],
+        "possible_modules": [],
+        "global_context": [],
+        "branch_memories": {},
+    }
+
+    # 全局 iteration attempts
+    if hasattr(memory, "iteration") and hasattr(memory.iteration, "attempts"):
+        data["global_iteration"] = list(memory.iteration.attempts)
+
+    # possible_modules
+    if hasattr(memory, "possible_modules"):
+        data["possible_modules"] = [
+            {"module": pm.module, "confidence": pm.confidence, "explanation": pm.explanation}
+            for pm in memory.possible_modules
+        ]
+
+    # 全局 context
+    if hasattr(memory, "context") and hasattr(memory.context, "conversation"):
+        data["global_context"] = list(memory.context.conversation)
+
+    # branch_memories
+    if hasattr(memory, "branch_memories"):
+        for module_name, branch_mem in memory.branch_memories.items():
+            branch_data = {}
+            if "context" in branch_mem and hasattr(branch_mem["context"], "conversation"):
+                branch_data["context"] = list(branch_mem["context"].conversation)
+            if "iteration" in branch_mem and hasattr(branch_mem["iteration"], "attempts"):
+                branch_data["iteration"] = list(branch_mem["iteration"].attempts)
+            data["branch_memories"][module_name] = branch_data
+
+    # 附加字段
+    if hasattr(memory, "_bug_module"):
+        data["bug_module"] = memory._bug_module
+    if hasattr(memory, "_owner_open_id"):
+        data["owner_open_id"] = memory._owner_open_id
+
+    return data
+
+
+def _format_value(obj, indent=0):
+    """类 JSON 格式化，字符串中的 \\n 显示为真实换行."""
+    spaces = "  " * indent
+    if isinstance(obj, dict):
+        if not obj:
+            return "{}"
+        items = []
+        for k, v in obj.items():
+            formatted_v = _format_value(v, indent + 1)
+            items.append(f'{spaces}  "{k}": {formatted_v}')
+        return "{\n" + ",\n".join(items) + f"\n{spaces}}}"
+    elif isinstance(obj, list):
+        if not obj:
+            return "[]"
+        items = []
+        for item in obj:
+            formatted_item = _format_value(item, indent + 1)
+            items.append(f"{spaces}  {formatted_item}")
+        return "[\n" + ",\n".join(items) + f"\n{spaces}]"
+    elif isinstance(obj, str):
+        if "\n" in obj or '"' in obj:
+            escaped = obj.replace('"""', '""\"')
+            return f'"""{escaped}"""'
+        return json.dumps(obj, ensure_ascii=False)
+    elif isinstance(obj, bool):
+        return "true" if obj else "false"
+    elif obj is None:
+        return "null"
+    else:
+        return str(obj)
+
+
+def save_memory_to_md(memory, result=None, filename="123.md"):
+    """将完整记忆保存为类 JSON 文件，value 中的 \\n 显示为真实换行."""
+    data = _memory_to_dict(memory, result)
+    content = _format_value(data)
+
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"\n结果已保存到: {filename}")
+
+
+# ========== main ==========
 
 async def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="多分支诊断流程")
-    parser.add_argument(
-        "--log-file",
-        type=str,
-        help="失败日志文件路径"
-    )
+    parser.add_argument("--log-file", type=str, help="失败日志文件路径")
     args = parser.parse_args()
 
-    # 输入数据
     input_data = {
         "situation": "用户说往前走但机器人没有反应",
         "failed_log": """
@@ -131,7 +296,6 @@ async def main():
         """,
     }
 
-    # 如果提供了日志文件，读取内容
     if args.log_file:
         log_path = Path(args.log_file)
         if log_path.exists():
@@ -145,36 +309,14 @@ async def main():
 
 
 if __name__ == "__main__":
-    result, memory = asyncio.run(main())
-
-    # ========== 输出记忆内容 ==========
-    print("\n" + "=" * 60)
-    print("全局记忆内容")
-    print("=" * 60)
-    print(f"\n全局 iteration attempts:")
-    for att in memory.iteration.attempts:
-        print(f"  - step: {att.get('step')}, target: {att.get('target_module')}, confidence: {att.get('confidence')}")
-
-    print(f"\npossible_modules:")
-    for pm in memory.possible_modules:
-        print(f"  - module: {pm.module}, confidence: {pm.confidence}")
-
-    print(f"\n全局 context conversation:")
-    for conv in memory.context.conversation:
-        print(f"  - step: {conv.get('step')}, role: {conv.get('role')}")
-
-    print(f"\nbranch_memories:")
-    for module_name, branch_mem in memory.branch_memories.items():
-        print(f"\n  [{module_name}]:")
-        print(f"    context conversation:")
-        for conv in branch_mem["context"].conversation:
-            print(f"      - step: {conv.get('step')}, role: {conv.get('role')}")
-        print(f"    iteration attempts:")
-        for att in branch_mem["iteration"].attempts:
-            print(f"      - step: {att.get('step')}, target: {att.get('target_module')}, confidence: {att.get('confidence')}")
-
-    print("\n" + "=" * 60)
-    print(f"最终结果: success={result.get('success')}")
-    print("=" * 60)
-
-    sys.exit(0 if result.get("success") else 1)
+    try:
+        result, memory = asyncio.run(main())
+        # print_memory(memory, result)  # 详细内容已保存到文件，终端仅输出进度
+        save_memory_to_md(memory, result)
+        print(f"\n结果已保存到文件，success={result.get('success')}")
+        sys.exit(0 if result.get("success") else 1)
+    except Exception as e:
+        print(f"\n执行失败: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)

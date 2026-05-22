@@ -133,15 +133,36 @@ class FeishuClient:
             "uuid": uuid_str,
         }
 
-        response = requests.post(
-            self._message_url,
-            params=params,
-            headers=self._get_headers(),
-            json=payload,
-            timeout=30,
-        )
-
-        result = response.json()
+        try:
+            response = requests.post(
+                self._message_url,
+                params=params,
+                headers=self._get_headers(),
+                json=payload,
+                timeout=30,
+            )
+            result = response.json()
+        except requests.exceptions.Timeout:
+            return {
+                "success": False,
+                "code": -1,
+                "msg": "Request timeout",
+                "data": {},
+            }
+        except requests.exceptions.ConnectionError as e:
+            return {
+                "success": False,
+                "code": -1,
+                "msg": f"Connection error: {str(e)}",
+                "data": {},
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "code": -1,
+                "msg": f"Request failed: {type(e).__name__}: {str(e)}",
+                "data": {},
+            }
 
         # 检查响应
         if response.status_code != 200:
@@ -168,87 +189,8 @@ class FeishuClient:
             "data": result.get("data", {}),
         }
 
-    def send_card_message(
-        self,
-        receive_id: str,
-        card_content: dict,
-        receive_id_type: str = "open_id",
-    ) -> dict:
-        """
-        发送卡片消息
-
-        Args:
-            receive_id: 接收者ID
-            card_content: 卡片内容字典
-            receive_id_type: 接收者ID类型
-
-        Returns:
-            API响应结果
-        """
-        content = json.dumps(card_content)
-        return self.send_message(
-            receive_id=receive_id,
-            msg_type="interactive",
-            content=content,
-            receive_id_type=receive_id_type,
-        )
-
-    def build_text_card(
-        self,
-        text: str,
-        title: Optional[str] = None,
-    ) -> dict:
-        """
-        构建文本卡片
-
-        Args:
-            text: 卡片文本内容
-            title: 可选的卡片标题
-
-        Returns:
-            卡片元素字典
-        """
-        elements = []
-
-        if title:
-            elements.append({
-                "tag": "div",
-                "text": {
-                    "tag": "lark_md",
-                    "content": f"**{title}**",
-                },
-            })
-
-        elements.append({
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": text,
-            },
-        })
-
-        return {
-            "config": {"wide_screen_mode": True},
-            "elements": elements,
-            "header": {
-                "title": {"tag": "plain_text", "content": title or "消息通知"},
-                "template": "red",
-            } if title else None,
-        }
-
 
 # 快捷函数
-_client: Optional[FeishuClient] = None
-
-
-def get_feishu_client() -> FeishuClient:
-    """获取飞书客户端单例"""
-    global _client
-    if _client is None:
-        _client = FeishuClient()
-    return _client
-
-
 def send_text_message(
     receive_id: str,
     text: str,
@@ -265,4 +207,5 @@ def send_text_message(
     Returns:
         API响应结果
     """
-    return get_feishu_client().send_text_message(receive_id, text, receive_id_type)
+    client = FeishuClient()
+    return client.send_text_message(receive_id, text, receive_id_type)

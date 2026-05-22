@@ -20,11 +20,18 @@ class LLMClient:
         )
         self.model = model or os.environ.get("OPENAI_MODEL", "MiniMax-M2.7")
 
+    @staticmethod
+    def _strip_think_tags(content: str) -> str:
+        """移除 LLM 返回中的 <think>...</think> 标签及其内容。"""
+        import re
+        return re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+
     def chat(
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
+        **kwargs,
     ) -> str:
         """
         发送对话请求
@@ -33,9 +40,13 @@ class LLMClient:
             messages: 消息列表 [{"role": "user", "content": "..."}]
             temperature: 温度参数
             max_tokens: 最大 token 数
+            **kwargs: 其他额外参数（如 thinking={"type": "enabled"}）
 
         Returns:
             LLM 回复内容
+
+        Raises:
+            RuntimeError: 当 API 调用失败时，包含详细的错误信息
         """
         params = {
             "model": self.model,
@@ -44,9 +55,25 @@ class LLMClient:
         }
         if max_tokens:
             params["max_tokens"] = max_tokens
+        # 默认关闭内部思考标签（MiniMax 格式），通过 extra_body 透传非标准参数
+        extra_body = kwargs.pop("extra_body", {})
+        if "thinking" in kwargs:
+            extra_body["thinking"] = kwargs.pop("thinking")
+        elif "thinking" not in extra_body:
+            extra_body["thinking"] = {"type": "disabled"}
+        if extra_body:
+            params["extra_body"] = extra_body
+        if kwargs:
+            params.update(kwargs)
 
-        response = self.client.chat.completions.create(**params)
-        return response.choices[0].message.content
+        try:
+            response = self.client.chat.completions.create(**params)
+            content = response.choices[0].message.content
+            if content is None:
+                raise RuntimeError("LLM 返回空内容 (content is None)")
+            return self._strip_think_tags(content)
+        except Exception as e:
+            raise RuntimeError(f"LLM API 调用失败: {type(e).__name__}: {str(e)}") from e
 # 全局单例
 _llm_client: Optional[LLMClient] = None
 
